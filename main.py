@@ -231,7 +231,7 @@ async def publish_posts():
 
     for i, (post_id, account_id, content, threads_user_id, access_token, persona_name) in enumerate(drafts):
         if i > 0:
-            jitter_seconds = random.randint(30, 240)
+            jitter_seconds = random.randint(5, 20)
             await asyncio.sleep(jitter_seconds)
         try:
             async with httpx.AsyncClient(timeout=30) as client:
