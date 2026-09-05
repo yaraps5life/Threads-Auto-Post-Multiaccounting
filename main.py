@@ -87,12 +87,44 @@ async def callback(request: Request):
     return {"short_lived": short_lived, "long_lived": long_lived, "saved_to_db": saved_to_db}
 
 
+async def fetch_crypto_prices() -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "bitcoin,ethereum",
+                    "vs_currencies": "usd",
+                    "include_24hr_change": "true",
+                },
+            )
+            data = resp.json()
+
+        btc = data.get("bitcoin", {})
+        eth = data.get("ethereum", {})
+
+        btc_price = btc.get("usd")
+        btc_change = btc.get("usd_24h_change", 0)
+        eth_price = eth.get("usd")
+        eth_change = eth.get("usd_24h_change", 0)
+
+        return (
+            f"РЕАЛЬНЫЕ ТЕКУЩИЕ ДАННЫЕ РЫНКА (используй эти цифры, не выдумывай свои):\n"
+            f"Биток: ${btc_price:,.0f} ({btc_change:+.2f}% за 24ч)\n"
+            f"Эфир: ${eth_price:,.0f} ({eth_change:+.2f}% за 24ч)"
+        )
+    except Exception:
+        return ""
+
+
 async def call_gemini(system_prompt: str, recent_posts: list[str]) -> str:
     recent_context = ""
     if recent_posts:
         recent_context = "Твои последние посты (не повторяйся, держи стиль):\n" + "\n---\n".join(recent_posts)
 
-    user_prompt = f"{recent_context}\n\nСгенерируй один новый пост для Threads по своей роли. Только текст поста, без кавычек и пояснений."
+    price_context = await fetch_crypto_prices()
+
+    user_prompt = f"{price_context}\n\n{recent_context}\n\nСгенерируй один новый пост для Threads по своей роли, отталкиваясь от реальных цифр прайса выше (направление 24ч изменения можно трактовать как контекст для твоего наблюдения). Не выдумывай точный процент профита, если это не обосновано реальным движением. Только текст поста, без кавычек и пояснений."
 
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
