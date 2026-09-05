@@ -12,6 +12,7 @@ CLIENT_SECRET = os.getenv("THREADS_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("THREADS_REDIRECT_URI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -304,3 +305,112 @@ async def update_token(request: Request):
     conn.close()
 
     return {"status": "updated", "account_id": account_id}
+
+async def fetch_insights(media_id: str, access_token: str) -> dict:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"https://graph.threads.net/v1.0/{media_id}/insights",
+            params={
+                "metric": "likes,replies,reposts,quotes,views",
+                "access_token": access_token,
+            },
+        )
+        return resp.json()
+
+
+async def collect_metrics_last_24h() -> list[dict]:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT pq.id, pq.threads_post_id, a.access_token, a.persona_name
+        FROM posts_queue pq
+        JOIN accounts a ON a.id = pq.account_id
+        WHERE pq.status = 'published'
+          AND pq.published_at >= NOW() - INTERVAL '24 hours'
+          AND pq.threads_post_id IS NOT NULL;
+    """)
+    rows = cur.fetchall()
+
+    summary = []
+
+    for post_id, threads_post_id, access_token, persona_name in rows:
+        data = await fetch_insights(threads_post_id, access_token)
+
+        metrics = {"likes": 0, "replies": 0, "reposts": 0, "quotes": 0, "views": 0}
+        if "data" in data:
+            for item in data["data"]:
+                name = item.get("name")
+                values = item.get("values", [])
+                if values and name in metrics:
+                    metrics[name] = values[0].get("value", 0)
+
+        cur.execute(
+            """INSERT INTO post_metrics (post_id, likes, replies, reposts)
+               VALUES (%s, %s, %s, %s);""",
+            (post_id, metrics["likes"], metrics["replies"], metrics["reposts"]),
+        )
+        conn.commit()
+
+        summary.append({
+            "persona": persona_name,
+            "post_id": post_id,
+            "likes": metrics["likes"],
+            "replies": metrics["replies"],
+            "reposts": metrics["reposts"],
+            "views": metrics["views"],
+        })
+
+    cur.close()
+    conn.close()
+    return summary
+
+
+def format_summary(summary: list[dict]) -> str:
+    if not summary:
+        return "За последние 24 часа опубликованных постов не найдено."
+
+    lines = ["📊 Метрики за последние 24 часа:\n"]
+    total_likes = total_replies = total_reposts = total_views = 0
+
+    for item in summary:
+        lines.append(
+            f"• {item['persona']}: 👁 {item['views']} | ❤️ {item['likes']} | 💬 {item['replies']} | 🔁 {item['reposts']}"
+        )
+        total_likes += item["likes"]
+        total_replies += item["replies"]
+        total_reposts += item["reposts"]
+        total_views += item["views"]
+
+    lines.append(f"\nИтого: 👁 {total_views} | ❤️ {total_likes} | 💬 {total_replies} | 🔁 {total_reposts}")
+    return "\n".join(lines)
+
+
+async def send_telegram_message(chat_id: int, text: str):
+    async with httpx.AsyncClient(timeout=20) as client:
+        await client.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+        )
+
+
+@app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    update = await request.json()
+
+    message = update.get("message", {})
+    text = message.get("text", "")
+    chat_id = message.get("chat", {}).get("id")
+
+    if not chat_id:
+        return {"ok": True}
+
+    if text.strip() in ("/stats", "/dashboard"):
+        await send_telegram_message(chat_id, "Собираю метрики за последние 24 часа...")
+        summary = await collect_metrics_last_24h()
+        reply = format_summary(summary)
+        await send_telegram_message(chat_id, reply)
+    else:
+        await send_telegram_message(chat_id, "Доступные команды:\n/stats — метрики за последние 24 часа")
+
+    return {"ok": True}
