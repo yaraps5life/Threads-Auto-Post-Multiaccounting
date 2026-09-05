@@ -150,3 +150,94 @@ async def list_posts(status: str = None):
             for r in rows
         ]
     }
+
+
+@app.post("/publish")
+async def publish_posts():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT pq.id, pq.account_id, pq.content, a.threads_user_id, a.access_token, a.persona_name
+        FROM posts_queue pq
+        JOIN accounts a ON a.id = pq.account_id
+        WHERE pq.status = 'draft';
+    """)
+    drafts = cur.fetchall()
+
+    results = []
+
+    for post_id, account_id, content, threads_user_id, access_token, persona_name in drafts:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                container_resp = await client.post(
+                    f"https://graph.threads.net/v1.0/{threads_user_id}/threads",
+                    data={
+                        "media_type": "TEXT",
+                        "text": content,
+                        "access_token": access_token,
+                    },
+                )
+                container_data = container_resp.json()
+
+            if "id" not in container_data:
+                cur.execute(
+                    "UPDATE posts_queue SET status = 'failed' WHERE id = %s;",
+                    (post_id,),
+                )
+                conn.commit()
+                results.append({"post_id": post_id, "persona": persona_name, "error": container_data})
+                continue
+
+            creation_id = container_data["id"]
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                publish_resp = await client.post(
+                    f"https://graph.threads.net/v1.0/{threads_user_id}/threads_publish",
+                    data={
+                        "creation_id": creation_id,
+                        "access_token": access_token,
+                    },
+                )
+                publish_data = publish_resp.json()
+
+            if "id" not in publish_data:
+                cur.execute(
+                    "UPDATE posts_queue SET status = 'failed' WHERE id = %s;",
+                    (post_id,),
+                )
+                conn.commit()
+                results.append({"post_id": post_id, "persona": persona_name, "error": publish_data})
+                continue
+
+            threads_post_id = publish_data["id"]
+
+            cur.execute(
+                """UPDATE posts_queue
+                   SET status = 'published', published_at = NOW(), threads_post_id = %s
+                   WHERE id = %s;""",
+                (threads_post_id, post_id),
+            )
+            conn.commit()
+
+            results.append({"post_id": post_id, "persona": persona_name, "threads_post_id": threads_post_id, "status": "published"})
+
+        except Exception as e:
+            cur.execute(
+                "UPDATE posts_queue SET status = 'failed' WHERE id = %s;",
+                (post_id,),
+            )
+            conn.commit()
+            results.append({"post_id": post_id, "persona": persona_name, "error": str(e)})
+
+    cur.close()
+    conn.close()
+
+    return {"published": results}
+
+
+@app.post("/generate-and-publish")
+async def generate_and_publish():
+    gen_result = await generate_posts()
+    pub_result = await publish_posts()
+    return {"generated": gen_result, "published": pub_result}
