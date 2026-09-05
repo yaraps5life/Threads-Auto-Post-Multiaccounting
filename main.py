@@ -27,8 +27,12 @@ async def root():
 @app.get("/callback")
 async def callback(request: Request):
     code = request.query_params.get("code")
+    account_id = request.query_params.get("account_id")
+
     if not code:
         return {"error": "no code in request"}
+
+    actual_redirect_uri = f"{REDIRECT_URI}?account_id={account_id}" if account_id else REDIRECT_URI
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -37,7 +41,7 @@ async def callback(request: Request):
                 "client_id": CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
                 "grant_type": "authorization_code",
-                "redirect_uri": REDIRECT_URI,
+                "redirect_uri": actual_redirect_uri,
                 "code": code,
             },
         )
@@ -57,7 +61,27 @@ async def callback(request: Request):
         )
         long_lived = resp2.json()
 
-    return {"short_lived": short_lived, "long_lived": long_lived}
+    threads_user_id = short_lived.get("user_id")
+    saved_to_db = None
+
+    if account_id and "access_token" in long_lived and threads_user_id:
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """UPDATE accounts
+                   SET access_token = %s, threads_user_id = %s, token_expires_at = NOW() + INTERVAL '60 days'
+                   WHERE id = %s;""",
+                (long_lived["access_token"], str(threads_user_id), account_id),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            saved_to_db = f"account_id {account_id} updated directly in DB"
+        except Exception as e:
+            saved_to_db = f"DB write failed: {e}"
+
+    return {"short_lived": short_lived, "long_lived": long_lived, "saved_to_db": saved_to_db}
 
 
 async def call_gemini(system_prompt: str, recent_posts: list[str]) -> str:
