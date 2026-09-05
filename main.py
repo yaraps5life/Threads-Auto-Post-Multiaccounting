@@ -1,4 +1,6 @@
 import os
+import random
+import asyncio
 import httpx
 import psycopg2
 from fastapi import FastAPI, Request
@@ -194,7 +196,10 @@ async def publish_posts():
 
     results = []
 
-    for post_id, account_id, content, threads_user_id, access_token, persona_name in drafts:
+    for i, (post_id, account_id, content, threads_user_id, access_token, persona_name) in enumerate(drafts):
+        if i > 0:
+            jitter_seconds = random.randint(30, 240)
+            await asyncio.sleep(jitter_seconds)
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 container_resp = await client.post(
