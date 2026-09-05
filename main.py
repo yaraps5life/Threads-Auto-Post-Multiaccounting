@@ -318,71 +318,91 @@ async def fetch_insights(media_id: str, access_token: str) -> dict:
         return resp.json()
 
 
-async def collect_metrics_last_24h() -> list[dict]:
+async def get_metrics_for_post(post_id, threads_post_id, access_token, persona_name):
+    data = await fetch_insights(threads_post_id, access_token)
+    metrics = {"likes": 0, "replies": 0, "reposts": 0, "quotes": 0, "views": 0}
+    if "data" in data:
+        for item in data["data"]:
+            name = item.get("name")
+            values = item.get("values", [])
+            if values and name in metrics:
+                metrics[name] = values[0].get("value", 0)
+    return {"persona": persona_name, "post_id": post_id, **metrics}
+
+
+async def collect_latest_per_persona() -> list[dict]:
     conn = get_conn()
     cur = conn.cursor()
 
+    cur.execute("""
+        SELECT DISTINCT ON (pq.account_id)
+               pq.id, pq.threads_post_id, a.access_token, a.persona_name
+        FROM posts_queue pq
+        JOIN accounts a ON a.id = pq.account_id
+        WHERE pq.status = 'published' AND pq.threads_post_id IS NOT NULL
+        ORDER BY pq.account_id, pq.published_at DESC;
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    summary = []
+    for post_id, threads_post_id, access_token, persona_name in rows:
+        summary.append(await get_metrics_for_post(post_id, threads_post_id, access_token, persona_name))
+    return summary
+
+
+async def collect_today_totals() -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # "Сегодня" по Минску (UTC+3)
     cur.execute("""
         SELECT pq.id, pq.threads_post_id, a.access_token, a.persona_name
         FROM posts_queue pq
         JOIN accounts a ON a.id = pq.account_id
         WHERE pq.status = 'published'
-          AND pq.published_at >= NOW() - INTERVAL '24 hours'
-          AND pq.threads_post_id IS NOT NULL;
+          AND pq.threads_post_id IS NOT NULL
+          AND (pq.published_at + INTERVAL '3 hours')::date = (NOW() + INTERVAL '3 hours')::date;
     """)
     rows = cur.fetchall()
-
-    summary = []
-
-    for post_id, threads_post_id, access_token, persona_name in rows:
-        data = await fetch_insights(threads_post_id, access_token)
-
-        metrics = {"likes": 0, "replies": 0, "reposts": 0, "quotes": 0, "views": 0}
-        if "data" in data:
-            for item in data["data"]:
-                name = item.get("name")
-                values = item.get("values", [])
-                if values and name in metrics:
-                    metrics[name] = values[0].get("value", 0)
-
-        cur.execute(
-            """INSERT INTO post_metrics (post_id, likes, replies, reposts)
-               VALUES (%s, %s, %s, %s);""",
-            (post_id, metrics["likes"], metrics["replies"], metrics["reposts"]),
-        )
-        conn.commit()
-
-        summary.append({
-            "persona": persona_name,
-            "post_id": post_id,
-            "likes": metrics["likes"],
-            "replies": metrics["replies"],
-            "reposts": metrics["reposts"],
-            "views": metrics["views"],
-        })
-
     cur.close()
     conn.close()
-    return summary
+
+    total_views = total_likes = total_replies = total_reposts = 0
+    post_count = 0
+
+    for post_id, threads_post_id, access_token, persona_name in rows:
+        m = await get_metrics_for_post(post_id, threads_post_id, access_token, persona_name)
+        total_views += m["views"]
+        total_likes += m["likes"]
+        total_replies += m["replies"]
+        total_reposts += m["reposts"]
+        post_count += 1
+
+    return {
+        "post_count": post_count,
+        "views": total_views,
+        "likes": total_likes,
+        "replies": total_replies,
+        "reposts": total_reposts,
+    }
 
 
-def format_summary(summary: list[dict]) -> str:
-    if not summary:
-        return "За последние 24 часа опубликованных постов не найдено."
+def format_summary(latest: list[dict], today: dict) -> str:
+    lines = ["📊 Последний пост по каждой персоне:\n"]
 
-    lines = ["📊 Метрики за последние 24 часа:\n"]
-    total_likes = total_replies = total_reposts = total_views = 0
+    if not latest:
+        lines.append("Опубликованных постов пока нет.")
+    else:
+        for item in latest:
+            lines.append(
+                f"• {item['persona']}: 👁 {item['views']} | ❤️ {item['likes']} | 💬 {item['replies']} | 🔁 {item['reposts']}"
+            )
 
-    for item in summary:
-        lines.append(
-            f"• {item['persona']}: 👁 {item['views']} | ❤️ {item['likes']} | 💬 {item['replies']} | 🔁 {item['reposts']}"
-        )
-        total_likes += item["likes"]
-        total_replies += item["replies"]
-        total_reposts += item["reposts"]
-        total_views += item["views"]
+    lines.append(f"\n📅 Всего за сегодня ({today['post_count']} постов):")
+    lines.append(f"👁 {today['views']} | ❤️ {today['likes']} | 💬 {today['replies']} | 🔁 {today['reposts']}")
 
-    lines.append(f"\nИтого: 👁 {total_views} | ❤️ {total_likes} | 💬 {total_replies} | 🔁 {total_reposts}")
     return "\n".join(lines)
 
 
@@ -406,11 +426,12 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
 
     if text.strip() in ("/stats", "/dashboard"):
-        await send_telegram_message(chat_id, "Собираю метрики за последние 24 часа...")
-        summary = await collect_metrics_last_24h()
-        reply = format_summary(summary)
+        await send_telegram_message(chat_id, "Собираю метрики...")
+        latest = await collect_latest_per_persona()
+        today = await collect_today_totals()
+        reply = format_summary(latest, today)
         await send_telegram_message(chat_id, reply)
     else:
-        await send_telegram_message(chat_id, "Доступные команды:\n/stats — метрики за последние 24 часа")
+        await send_telegram_message(chat_id, "Доступные команды:\n/stats — последний пост по каждой персоне + итог за сегодня")
 
     return {"ok": True}
