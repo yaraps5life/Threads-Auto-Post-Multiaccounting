@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head><title>OAuth Callback</title></head>
+<body>
+  <h2>Authorization Code:</h2>
+  <p id="code" style="word-break: break-all; font-family: monospace;"></p>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    document.getElementById('code').innerText = params.get('code') || 'нет кода в URL';
+  </script>
+</body>
+</html>
