@@ -104,7 +104,10 @@ async def call_gemini(system_prompt: str, recent_posts: list[str]) -> str:
         data = resp.json()
 
     try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if len(text) > 500:
+            text = text[:497].rsplit(" ", 1)[0] + "..."
+        return text
     except (KeyError, IndexError):
         raise ValueError(f"Gemini response error: {data}")
 
