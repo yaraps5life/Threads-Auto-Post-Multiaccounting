@@ -241,3 +241,34 @@ async def generate_and_publish():
     gen_result = await generate_posts()
     pub_result = await publish_posts()
     return {"generated": gen_result, "published": pub_result}
+
+
+@app.post("/update-token")
+async def update_token(request: Request):
+    body = await request.json()
+    account_id = body.get("account_id")
+    access_token = body.get("access_token")
+    threads_user_id = body.get("threads_user_id")
+
+    if not account_id or not access_token:
+        return {"error": "account_id and access_token are required"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if threads_user_id:
+        cur.execute(
+            "UPDATE accounts SET access_token = %s, threads_user_id = %s WHERE id = %s;",
+            (access_token, threads_user_id, account_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE accounts SET access_token = %s WHERE id = %s;",
+            (access_token, account_id),
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "updated", "account_id": account_id}
