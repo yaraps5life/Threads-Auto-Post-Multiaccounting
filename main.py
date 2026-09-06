@@ -87,48 +87,127 @@ async def callback(request: Request):
     return {"short_lived": short_lived, "long_lived": long_lived, "saved_to_db": saved_to_db}
 
 
-async def fetch_crypto_prices() -> str:
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "bitcoin,ethereum",
-                    "vs_currencies": "usd",
-                    "include_24hr_change": "true",
-                },
-            )
-            data = resp.json()
+ASSET_POOL = {
+    "биток": {"source": "coingecko", "id": "bitcoin", "label": "Биток"},
+    "эфир": {"source": "coingecko", "id": "ethereum", "label": "Эфир"},
+    "солана": {"source": "coingecko", "id": "solana", "label": "Солана"},
+    "золото": {"source": "yahoo", "symbol": "GC=F", "label": "Золото"},
+    "евродоллар": {"source": "yahoo", "symbol": "EURUSD=X", "label": "Евродоллар"},
+    "насдак": {"source": "yahoo", "symbol": "^IXIC", "label": "Насдак"},
+    "снп500": {"source": "yahoo", "symbol": "^GSPC", "label": "S&P500"},
+    "гер40": {"source": "yahoo", "symbol": "^GDAXI", "label": "DAX (Гер40)"},
+}
 
-        btc = data.get("bitcoin", {})
-        eth = data.get("ethereum", {})
 
-        btc_price = btc.get("usd")
-        btc_change = btc.get("usd_24h_change", 0)
-        eth_price = eth.get("usd")
-        eth_change = eth.get("usd_24h_change", 0)
-
-        return (
-            f"РЕАЛЬНЫЕ ТЕКУЩИЕ ДАННЫЕ РЫНКА (используй эти цифры, не выдумывай свои):\n"
-            f"Биток: ${btc_price:,.0f} ({btc_change:+.2f}% за 24ч)\n"
-            f"Эфир: ${eth_price:,.0f} ({eth_change:+.2f}% за 24ч)"
+async def fetch_coingecko(coin_id: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": coin_id, "vs_currencies": "usd", "include_24hr_change": "true"},
         )
+        data = resp.json()
+    coin = data.get(coin_id, {})
+    return {"price": coin.get("usd"), "change": coin.get("usd_24h_change", 0)}
+
+
+async def fetch_yahoo(symbol: str) -> dict:
+    async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        resp = await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}")
+        data = resp.json()
+    result = data["chart"]["result"][0]["meta"]
+    price = result.get("regularMarketPrice")
+    prev_close = result.get("previousClose") or result.get("chartPreviousClose")
+    change = ((price - prev_close) / prev_close * 100) if price and prev_close else 0
+    return {"price": price, "change": change}
+
+
+async def fetch_asset_data(asset_key: str) -> dict:
+    asset = ASSET_POOL[asset_key]
+    try:
+        if asset["source"] == "coingecko":
+            data = await fetch_coingecko(asset["id"])
+        else:
+            data = await fetch_yahoo(asset["symbol"])
+        return {"label": asset["label"], **data}
     except Exception:
+        return None
+
+
+async def fetch_market_context(num_assets: int = 2) -> str:
+    chosen = random.sample(list(ASSET_POOL.keys()), k=min(num_assets, len(ASSET_POOL)))
+    lines = ["РЕАЛЬНЫЕ ТЕКУЩИЕ ДАННЫЕ РЫНКА (используй эти цифры, не выдумывай свои):"]
+
+    for key in chosen:
+        data = await fetch_asset_data(key)
+        if data and data["price"]:
+            lines.append(f"{data['label']}: ${data['price']:,.2f} ({data['change']:+.2f}% за 24ч)")
+
+    if len(lines) == 1:
         return ""
+    return "\n".join(lines)
 
 
-async def call_gemini(system_prompt: str, recent_posts: list[str]) -> str:
+
+
+TOPIC_ANGLES = {
+    "Структурник": [
+        "ликвидность и sweep уровней",
+        "объёмы и накопление/распределение",
+        "тайминг сессий (London/NY)",
+        "Premium/Discount зоны",
+        "SMT-дивергенция между активами",
+        "сравнение с вчерашним движением",
+        "реакция рынка на новостной фон",
+    ],
+    "Тизер сетапов": [
+        "паттерн FVG",
+        "паттерн Order Block",
+        "паттерн BOS/CHoCH",
+        "зона ликвидности перед пробоем",
+        "дивергенция между активами как сигнал",
+    ],
+    "Учитель SMT/ICT": [
+        "почему нельзя входить в мидрендже",
+        "что такое OB и как его находить",
+        "что такое FVG и как он образуется",
+        "что такое CHoCH и зачем он нужен",
+        "почему важна SMT-дивергенция",
+        "типичная ошибка новичков в тайминге входа",
+    ],
+    "Флексер (профиты)": [
+        "сделка на пробой уровня",
+        "сделка на отбой от зоны",
+        "сделка на дивергенции активов",
+        "сделка на sweep ликвидности",
+    ],
+}
+
+
+async def call_gemini(system_prompt: str, recent_posts: list[str], persona_name: str = "") -> str:
     recent_context = ""
     if recent_posts:
-        recent_context = "Твои последние посты (не повторяйся, держи стиль):\n" + "\n---\n".join(recent_posts)
+        recent_context = "Твои последние посты (пиши МАКСИМАЛЬНО по-другому — другая структура предложений, другое начало, другой фокус):\n" + "\n---\n".join(recent_posts)
 
-    price_context = await fetch_crypto_prices()
+    price_context = await fetch_market_context(num_assets=random.choice([1, 2]))
 
-    user_prompt = f"{price_context}\n\n{recent_context}\n\nСгенерируй один новый пост для Threads по своей роли, отталкиваясь от реальных цифр прайса выше (направление 24ч изменения можно трактовать как контекст для твоего наблюдения). Не выдумывай точный процент профита, если это не обосновано реальным движением. Только текст поста, без кавычек и пояснений."
+    angles = TOPIC_ANGLES.get(persona_name, [])
+    angle_instruction = ""
+    if angles:
+        chosen_angle = random.choice(angles)
+        angle_instruction = f"\n\nТЕМА-ФОКУС ЭТОГО ПОСТА (пиши ТОЛЬКО про это, не растекайся на общий обзор рынка): {chosen_angle}"
+
+    user_prompt = (
+        f"{price_context}{angle_instruction}\n\n{recent_context}\n\n"
+        f"Сгенерируй один новый пост для Threads по своей роли, отталкиваясь от реальных цифр рынка выше "
+        f"(если среди данных есть актив, подходящий под тему-фокус, используй именно его; если нет прямого совпадения "
+        f"— упомяни рынок в целом). Не выдумывай точный процент профита, если это не обосновано реальным движением. "
+        f"Не начинай пост с тех же слов, что в предыдущих примерах. Только текст поста, без кавычек и пояснений."
+    )
 
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {"temperature": 1.4},
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -169,7 +248,7 @@ async def generate_posts():
         recent = [row[0] for row in cur.fetchall()]
 
         try:
-            new_post = await call_gemini(system_prompt, recent)
+            new_post = await call_gemini(system_prompt, recent, persona_name)
         except Exception as e:
             results.append({"account_id": account_id, "persona": persona_name, "error": str(e)})
             continue
