@@ -1,4 +1,5 @@
 import os
+import sys
 import httpx
 
 APP_URL = os.getenv("APP_URL", "https://threads-auto-post-multiaccounting-production.up.railway.app")
@@ -9,3 +10,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    sys.stdout.flush()
+    os._exit(0)
