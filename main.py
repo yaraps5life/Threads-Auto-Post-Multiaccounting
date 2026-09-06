@@ -234,45 +234,59 @@ async def publish_posts():
             jitter_seconds = random.randint(5, 20)
             await asyncio.sleep(jitter_seconds)
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                container_resp = await client.post(
-                    f"https://graph.threads.net/v1.0/{threads_user_id}/threads",
-                    data={
-                        "media_type": "TEXT",
-                        "text": content,
-                        "access_token": access_token,
-                    },
-                )
-                container_data = container_resp.json()
+            max_attempts = 3
+            publish_data = None
+            last_error = None
 
-            if "id" not in container_data:
+            for attempt in range(max_attempts):
+                if attempt > 0:
+                    await asyncio.sleep(5 + attempt * 5)
+
+                async with httpx.AsyncClient(timeout=30) as client:
+                    container_resp = await client.post(
+                        f"https://graph.threads.net/v1.0/{threads_user_id}/threads",
+                        data={
+                            "media_type": "TEXT",
+                            "text": content,
+                            "access_token": access_token,
+                        },
+                    )
+                    container_data = container_resp.json()
+
+                if "id" not in container_data:
+                    last_error = container_data
+                    continue
+
+                creation_id = container_data["id"]
+
+                # небольшая пауза перед публикацией — контейнеру Threads иногда нужно
+                # время "устояться", прежде чем его можно опубликовать
+                await asyncio.sleep(3)
+
+                async with httpx.AsyncClient(timeout=30) as client:
+                    publish_resp = await client.post(
+                        f"https://graph.threads.net/v1.0/{threads_user_id}/threads_publish",
+                        data={
+                            "creation_id": creation_id,
+                            "access_token": access_token,
+                        },
+                    )
+                    publish_data = publish_resp.json()
+
+                if "id" in publish_data:
+                    last_error = None
+                    break
+                else:
+                    last_error = publish_data
+                    publish_data = None
+
+            if publish_data is None:
                 cur.execute(
                     "UPDATE posts_queue SET status = 'failed' WHERE id = %s;",
                     (post_id,),
                 )
                 conn.commit()
-                results.append({"post_id": post_id, "persona": persona_name, "error": container_data})
-                continue
-
-            creation_id = container_data["id"]
-
-            async with httpx.AsyncClient(timeout=30) as client:
-                publish_resp = await client.post(
-                    f"https://graph.threads.net/v1.0/{threads_user_id}/threads_publish",
-                    data={
-                        "creation_id": creation_id,
-                        "access_token": access_token,
-                    },
-                )
-                publish_data = publish_resp.json()
-
-            if "id" not in publish_data:
-                cur.execute(
-                    "UPDATE posts_queue SET status = 'failed' WHERE id = %s;",
-                    (post_id,),
-                )
-                conn.commit()
-                results.append({"post_id": post_id, "persona": persona_name, "error": publish_data})
+                results.append({"post_id": post_id, "persona": persona_name, "error": last_error, "attempts": max_attempts})
                 continue
 
             threads_post_id = publish_data["id"]
