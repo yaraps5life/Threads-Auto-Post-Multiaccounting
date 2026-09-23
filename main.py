@@ -212,7 +212,8 @@ async def call_gemini(system_prompt: str, recent_posts: list[str], persona_name:
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            GEMINI_URL,
+            headers={"x-goog-api-key": GEMINI_API_KEY},
             json=payload,
         )
         data = resp.json()
